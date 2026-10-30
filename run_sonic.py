@@ -43,13 +43,16 @@ parser.add_argument("--duration", type=float, default=0.0, help="kill after N s 
 parser.add_argument("extra", nargs=argparse.REMAINDER, help="extra args passed to the binary")
 args = parser.parse_args()
 
+# CUDA toolkit the deployment was built with: $CUDA_DIR, else /usr/local/cuda-12.2 (this PC), else /usr/local/cuda
+CUDA_DIR = os.environ.get("CUDA_DIR") or next(
+    (d for d in ("/usr/local/cuda-12.2", "/usr/local/cuda") if os.path.isdir(d)), "/usr/local/cuda")
 env = dict(os.environ)
 libs = [
     f"{THIRD_PARTY}/TensorRT-10.13.3.9/lib",
     f"{THIRD_PARTY}/onnxruntime-linux-x64-1.16.3/lib",
     f"{THIRD_PARTY}/sonic_deps/lib",
     f"{SONIC}/thirdparty/unitree_sdk2/thirdparty/lib/x86_64",
-    "/usr/local/cuda-12.2/lib64",
+    os.path.join(CUDA_DIR, "lib64"),
 ]
 env["LD_LIBRARY_PATH"] = ":".join(libs + [env.get("LD_LIBRARY_PATH", "")])
 
