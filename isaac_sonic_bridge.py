@@ -8,6 +8,8 @@ This replaces GR00T-WholeBodyControl's MuJoCo sim loop (gear_sonic/utils/mujoco_
 and publishes ``rt/lowstate`` (motors in Unitree order + pelvis IMU), ``rt/secondary_imu`` (torso IMU) and
 ``rt/odostate``. The robot is SONIC's own training asset (URDF, armature, effort/velocity limits from
 gear_sonic/envs/manager_env/robots/g1.py) with the joint drives zeroed, so all torque comes from the command.
+With ``--hands dex3`` (default) the asset's Dex3 fingers are movable (see g1_dex3.py) and follow
+``rt/dex3/{left,right}/cmd`` with the same law; their state goes out on ``rt/dex3/{left,right}/state``.
 
 Like the MuJoCo sim, the pelvis starts on an elastic band (a virtual gantry). Keys in the Isaac Sim window:
     9  lower the robot onto its feet and release (again: catch it)      7 / 8  lower / raise the band
@@ -32,6 +34,8 @@ parser.add_argument("--physics_hz", type=int, default=200,
 parser.add_argument("--pd", choices=["implicit", "explicit"], default="implicit",
                     help="implicit: kp/kd/q/dq from lowcmd go into PhysX joint drives (how SONIC was trained in Isaac Lab); "
                          "explicit: torque = tau + kp*(q*-q) + kd*(dq*-dq) per physics step (MuJoCo bridge law)")
+parser.add_argument("--hands", choices=["dex3", "none"], default="dex3",
+                    help="dex3: movable Dex3 fingers driven by rt/dex3/*/cmd; none: fingers fixed (SONIC training asset)")
 parser.add_argument("--render_hz", type=int, default=50)
 parser.add_argument("--band_height", type=float, default=1.0, help="elastic band anchor height for the pelvis [m]")
 parser.add_argument("--band_fade", type=float, default=0.0, help="seconds to fade the band out after touchdown (0 = cut)")
@@ -69,11 +73,21 @@ from gear_sonic.envs.manager_env.robots.g1 import G1_CYLINDER_MODEL_12_DEX_CFG  
 
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber  # noqa: E402
 from unitree_sdk2py.idl.default import (  # noqa: E402
+    unitree_hg_msg_dds__HandState_,
     unitree_hg_msg_dds__IMUState_,
     unitree_hg_msg_dds__LowState_,
     unitree_hg_msg_dds__OdoState_,
 )
-from unitree_sdk2py.idl.unitree_hg.msg.dds_ import IMUState_, LowCmd_, LowState_, OdoState_  # noqa: E402
+from unitree_sdk2py.idl.unitree_hg.msg.dds_ import (  # noqa: E402
+    HandCmd_,
+    HandState_,
+    IMUState_,
+    LowCmd_,
+    LowState_,
+    OdoState_,
+)
+
+from g1_dex3 import DEX3_KD, DEX3_KP, DEX3_LEFT, DEX3_RIGHT, NUM_DEX3, add_dex3, filter_hand_self_collisions  # noqa: E402,E501
 
 # Unitree motor order (= gear_sonic_deploy/g1/g1_29dof.xml actuator order = LowCmd/LowState index)
 UNITREE_JOINTS = [
@@ -160,10 +174,38 @@ class LowCmdBuffer:
             return self.q.copy(), self.dq.copy(), self.kp.copy(), self.kd.copy(), self.tau.copy(), self.count
 
 
+class HandCmdBuffer:
+    """Latest rt/dex3/<side>/cmd. Until one arrives the fingers hold open (q=0) with Dex3's default gains."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.q = np.zeros(NUM_DEX3)
+        self.dq = np.zeros(NUM_DEX3)
+        self.kp = np.full(NUM_DEX3, DEX3_KP)
+        self.kd = np.full(NUM_DEX3, DEX3_KD)
+        self.tau = np.zeros(NUM_DEX3)
+        self.count = 0
+
+    def handler(self, msg: HandCmd_):
+        mc = msg.motor_cmd
+        with self.lock:
+            for i in range(min(NUM_DEX3, len(mc))):
+                self.q[i], self.dq[i] = mc[i].q, mc[i].dq
+                self.kp[i], self.kd[i], self.tau[i] = mc[i].kp, mc[i].kd, mc[i].tau
+            self.count += 1
+
+    def snapshot(self):
+        with self.lock:
+            return self.q.copy(), self.dq.copy(), self.kp.copy(), self.kd.copy(), self.tau.copy()
+
+
 def make_robot_cfg():
     cfg = G1_CYLINDER_MODEL_12_DEX_CFG.copy()
     cfg.prim_path = "/World/Robot"
-    cfg.spawn.asset_path = os.path.join(SONIC_ROOT, cfg.spawn.asset_path)
+    if args_cli.hands == "dex3":
+        add_dex3(cfg, SONIC_ROOT)
+    else:
+        cfg.spawn.asset_path = os.path.join(SONIC_ROOT, cfg.spawn.asset_path)
     # all torque comes from the lowcmd PD law -> zero the simulator-side drives (keep armature and limits)
     for act in cfg.actuators.values():
         act.stiffness = 0.0
@@ -211,6 +253,8 @@ def main():
     ground.func("/World/ground", ground)
     sim_utils.DomeLightCfg(intensity=2500.0).func("/World/light", sim_utils.DomeLightCfg(intensity=2500.0))
     robot = Articulation(make_robot_cfg())
+    if args_cli.hands == "dex3":
+        print(f"[bridge] hand self-collisions filtered ({filter_hand_self_collisions()} pairs)", flush=True)
     sim.reset()
 
     names = robot.joint_names
@@ -219,7 +263,11 @@ def main():
     u2i = np.array([names.index(j) for j in UNITREE_JOINTS])  # unitree index -> isaac joint index
     pelvis = robot.body_names.index("pelvis")
     torso = robot.body_names.index("torso_link")
-    print(f"[bridge] {NUM_MOTORS} motors mapped | physics {args_cli.physics_hz} Hz | render every {render_every}")
+    hands = args_cli.hands == "dex3"
+    h2i = {side: np.array([names.index(j) for j in joints]) if hands else np.zeros(0, dtype=int)
+           for side, joints in (("left", DEX3_LEFT), ("right", DEX3_RIGHT))}
+    print(f"[bridge] {NUM_MOTORS} motors mapped{' + 2x7 Dex3 fingers' if hands else ''} | physics "
+          f"{args_cli.physics_hz} Hz | {'no rendering (headless)' if args_cli.headless else f'render every {render_every}'}")
 
     # ---- DDS ----
     ChannelFactoryInitialize(args_cli.domain_id, args_cli.interface)
@@ -235,6 +283,15 @@ def main():
     cmd = LowCmdBuffer()
     sub_cmd = ChannelSubscriber("rt/lowcmd", LowCmd_)
     sub_cmd.Init(cmd.handler, 1)
+    hand_cmd, hand_state, pub_hand, sub_hand = {}, {}, {}, {}
+    if hands:
+        for side in ("left", "right"):
+            hand_cmd[side] = HandCmdBuffer()
+            sub_hand[side] = ChannelSubscriber(f"rt/dex3/{side}/cmd", HandCmd_)
+            sub_hand[side].Init(hand_cmd[side].handler, 1)
+            hand_state[side] = unitree_hg_msg_dds__HandState_()
+            pub_hand[side] = ChannelPublisher(f"rt/dex3/{side}/state", HandState_)
+            pub_hand[side].Init()
 
     band = ElasticBand(args_cli.band_height, fade_time=max(args_cli.band_fade, 1e-3))
     state = {"reset": False}
@@ -276,7 +333,7 @@ def main():
     t_wall0 = time.time()
     last_log = 0.0
     zeros_t = torch.zeros(1, 1, 3, device=sim.device)
-    gains_state = {"kp": np.zeros(NUM_MOTORS), "kd": np.zeros(NUM_MOTORS)}
+    gains_state = {"kp": None, "kd": None}
     perf = {"physics": 0.0, "render": 0.0, "n_physics": 0, "n_render": 0}
 
     while simulation_app.is_running():
@@ -290,28 +347,30 @@ def main():
             reset_robot()
             print("[bridge] robot reset onto the band")
 
-        # ---- command -> joint torques (Unitree order -> Isaac order) ----
+        # ---- command -> joint torques (Unitree / Dex3 order -> Isaac order) ----
         q_des, dq_des, kp, kd, tau_ff, n_cmd = cmd.snapshot()
-        q = robot.data.joint_pos[0].cpu().numpy()[u2i]
-        dq = robot.data.joint_vel[0].cpu().numpy()[u2i]
+        full = np.zeros((5, len(names)))  # q, dq, kp, kd, tau in Isaac joint order
+        full[:, u2i] = np.stack([q_des, dq_des, kp, kd, tau_ff])
+        for side, idx in h2i.items():
+            if len(idx):
+                full[:, idx] = np.stack(hand_cmd[side].snapshot())
+        f_q, f_dq, f_kp, f_kd, f_tau = full
         if args_cli.pd == "explicit":
-            tau_u = tau_ff + kp * (q_des - q) + kd * (dq_des - dq)
-            tau = np.zeros(len(names))
-            tau[u2i] = tau_u
+            q_all = robot.data.joint_pos[0].cpu().numpy()
+            dq_all = robot.data.joint_vel[0].cpu().numpy()
+            tau = f_tau + f_kp * (f_q - q_all) + f_kd * (f_dq - dq_all)
             robot.set_joint_effort_target(torch.tensor(tau, dtype=torch.float32, device=sim.device)[None])
         else:
-            def to_isaac(x):
-                out = np.zeros(len(names))
-                out[u2i] = x
-                return torch.tensor(out, dtype=torch.float32, device=sim.device)[None]
+            def to_t(x):
+                return torch.tensor(x, dtype=torch.float32, device=sim.device)[None]
 
-            if not np.array_equal(kp, gains_state["kp"]) or not np.array_equal(kd, gains_state["kd"]):
-                robot.write_joint_stiffness_to_sim(to_isaac(kp))
-                robot.write_joint_damping_to_sim(to_isaac(kd))
-                gains_state["kp"], gains_state["kd"] = kp.copy(), kd.copy()
-            robot.set_joint_position_target(to_isaac(q_des))
-            robot.set_joint_velocity_target(to_isaac(dq_des))
-            robot.set_joint_effort_target(to_isaac(tau_ff))
+            if not np.array_equal(f_kp, gains_state["kp"]) or not np.array_equal(f_kd, gains_state["kd"]):
+                robot.write_joint_stiffness_to_sim(to_t(f_kp))
+                robot.write_joint_damping_to_sim(to_t(f_kd))
+                gains_state["kp"], gains_state["kd"] = f_kp.copy(), f_kd.copy()
+            robot.set_joint_position_target(to_t(f_q))
+            robot.set_joint_velocity_target(to_t(f_dq))
+            robot.set_joint_effort_target(to_t(f_tau))
 
         if first_active_cmd_t is None and n_cmd > 0 and np.any(kp > 0):
             first_active_cmd_t = sim_time
@@ -339,7 +398,9 @@ def main():
             robot.set_external_force_and_torque(zeros_t, zeros_t, body_ids=[pelvis], is_global=True)
 
         robot.write_data_to_sim()
-        do_render = step % render_every == 0
+        # headless: never render. isaac_viewer.py draws the robot; render calls here stall the control loop and,
+        # with the viewer competing for the GPU, make SONIC shake and fall even with a constant input
+        do_render = step % render_every == 0 and not args_cli.headless
         t_s = time.perf_counter()
         sim.step(render=do_render)
         if do_render and args_cli.debug_stall_ms > 0:
@@ -382,6 +443,14 @@ def main():
         pub_state.Write(low_state)
         pub_imu.Write(torso_imu)
         pub_odo.Write(odo)
+        if hands:
+            q_all = robot.data.joint_pos[0].cpu().numpy()
+            dq_all = robot.data.joint_vel[0].cpu().numpy()
+            for side, idx in h2i.items():
+                for i, j in enumerate(idx):
+                    hand_state[side].motor_state[i].q = float(q_all[j])
+                    hand_state[side].motor_state[i].dq = float(dq_all[j])
+                pub_hand[side].Write(hand_state[side])
 
         if sim_time - last_log >= args_cli.log_every:
             last_log = sim_time

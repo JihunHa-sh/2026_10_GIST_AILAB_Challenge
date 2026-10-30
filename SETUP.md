@@ -63,7 +63,7 @@ T=$THIRD_PARTY/GR00T-WholeBodyControl/gear_sonic_deploy/thirdparty/unitree_sdk2/
 H=$THIRD_PARTY/cyclonedds_home && mkdir -p $H/bin && ln -sfn $T/include $H/include && ln -sfn $T/lib/x86_64 $H/lib
 CYCLONEDDS_HOME=$H pip install "cyclonedds==0.10.2"
 pip install --no-deps -e $THIRD_PARTY/GR00T-WholeBodyControl/external_dependencies/unitree_sdk2_python
-pip install joblib pyzmq
+pip install joblib pyzmq msgpack     # msgpack: SONIC's PICO teleop code (teleop_planner.py)
 ```
 
 ## 4. Fast SAM 3D Body

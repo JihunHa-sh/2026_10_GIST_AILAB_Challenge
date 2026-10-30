@@ -3,7 +3,7 @@
 Rendering in the physics process stalls the 200 Hz control loop for ~7 ms per frame, and SONIC is sensitive to that
 jitter (walking trials fell in GUI mode but not headless, and also fell headless with artificial 7 ms stalls). So the
 physics stays headless and this separate process mirrors its state: it subscribes to rt/lowstate (joint angles) and
-rt/odostate (root pose) and only renders. Keys pressed here are forwarded to the bridge:
+rt/odostate (root pose) (+ rt/dex3/*/state for the fingers) and only renders. Keys pressed here are forwarded to the bridge:
     9  lower the robot onto its feet and release (again: catch it)    7 / 8  lower / raise the gantry
     R  reset the robot onto the gantry
 Run (Isaac Lab env) after starting the bridge:
@@ -24,6 +24,7 @@ parser.add_argument("--control_port", type=int, default=5558)
 parser.add_argument("--fps", type=float, default=30.0)
 parser.add_argument("--screenshot", default=None, help="debug: save a viewport PNG here after --screenshot_after s")
 parser.add_argument("--screenshot_after", type=float, default=40.0)
+parser.add_argument("--hands", choices=["dex3", "none"], default="dex3", help="must match the bridge's --hands")
 parser.add_argument("--no_follow", action="store_true", help="keep the camera fixed instead of following the robot")
 AppLauncher.add_app_launcher_args(parser)
 parser.set_defaults(device="cpu")
@@ -49,7 +50,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gear_sonic.envs.manager_env.robots.g1 import G1_CYLINDER_MODEL_12_DEX_CFG  # noqa: E402
 
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber  # noqa: E402
-from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_, OdoState_  # noqa: E402
+from unitree_sdk2py.idl.unitree_hg.msg.dds_ import HandState_, LowState_, OdoState_  # noqa: E402
+
+from g1_dex3 import DEX3_LEFT, DEX3_RIGHT, NUM_DEX3, add_dex3  # noqa: E402
 
 # same motor order as isaac_sonic_bridge.UNITREE_JOINTS (importing the bridge would start a second app)
 UNITREE_JOINTS = [
@@ -72,7 +75,13 @@ class StateBuffer:
         self.lock = threading.Lock()
         self.q = None
         self.root = None  # pos (3), quat wxyz (4)
+        self.hand = {"left": None, "right": None}
         self.n = 0
+
+    def on_hand(self, side, msg):
+        q = np.array([msg.motor_state[i].q for i in range(NUM_DEX3)])
+        with self.lock:
+            self.hand[side] = q
 
     def on_lowstate(self, msg):
         q = np.array([msg.motor_state[i].q for i in range(len(UNITREE_JOINTS))])
@@ -88,6 +97,10 @@ class StateBuffer:
         with self.lock:
             return (None if self.q is None else self.q.copy()), (None if self.root is None else self.root.copy()), self.n
 
+    def get_hands(self):
+        with self.lock:
+            return dict(self.hand)
+
 
 def main():
     sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=1.0 / args_cli.fps, device=args_cli.device))
@@ -97,13 +110,18 @@ def main():
     light.func("/World/light", light)
     cfg = G1_CYLINDER_MODEL_12_DEX_CFG.copy()
     cfg.prim_path = "/World/Robot"
-    cfg.spawn.asset_path = os.path.join(SONIC_ROOT, cfg.spawn.asset_path)
+    if args_cli.hands == "dex3":
+        add_dex3(cfg, SONIC_ROOT)
+    else:
+        cfg.spawn.asset_path = os.path.join(SONIC_ROOT, cfg.spawn.asset_path)
     cfg.spawn.rigid_props.disable_gravity = True  # display only: pose is written every frame
     cfg.spawn.activate_contact_sensors = False
     cfg.spawn.collision_props = sim_utils.CollisionPropertiesCfg(collision_enabled=False)
     robot = Articulation(cfg)
     sim.reset()
     u2i = np.array([robot.joint_names.index(j) for j in UNITREE_JOINTS])
+    h2i = {} if args_cli.hands != "dex3" else {
+        side: np.array([robot.joint_names.index(j) for j in joints]) for side, joints in (("left", DEX3_LEFT), ("right", DEX3_RIGHT))}
 
     ChannelFactoryInitialize(args_cli.domain_id, args_cli.interface)
     buf = StateBuffer()
@@ -111,6 +129,10 @@ def main():
     sub_state.Init(buf.on_lowstate, 1)
     sub_odo = ChannelSubscriber("rt/odostate", OdoState_)
     sub_odo.Init(buf.on_odo, 1)
+    sub_hand = {}
+    for side in h2i:
+        sub_hand[side] = ChannelSubscriber(f"rt/dex3/{side}/state", HandState_)
+        sub_hand[side].Init(lambda msg, side=side: buf.on_hand(side, msg), 1)
 
     push = zmq.Context.instance().socket(zmq.PUSH)
     push.setsockopt(zmq.LINGER, 0)
@@ -139,6 +161,9 @@ def main():
         if q_u is not None and root is not None:
             q = robot.data.default_joint_pos.clone()
             q[0, u2i] = torch.tensor(q_u, dtype=torch.float32, device=sim.device)
+            for side, qh in buf.get_hands().items():
+                if qh is not None:
+                    q[0, h2i[side]] = torch.tensor(qh, dtype=torch.float32, device=sim.device)
             robot.write_joint_state_to_sim(q, joint_vel)
             robot.write_root_pose_to_sim(torch.tensor(root, dtype=torch.float32, device=sim.device)[None])
             robot.write_root_velocity_to_sim(torch.zeros(1, 6, device=sim.device))

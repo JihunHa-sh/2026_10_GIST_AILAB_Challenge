@@ -1,102 +1,117 @@
 # 2026_10_GIST_AILAB_Challenge
 
-Whole-body teleoperation of a **Unitree G1 in Isaac Sim** from a single **RealSense D555**, the way
-[Fast SAM 3D Body](https://github.com/yangtiming/Fast-SAM-3D-Body) drives the G1 — no IK in the loop:
+RealSense D555 카메라 한 대로 **Isaac Sim 속 Unitree G1 (Dex3 손)** 을 원격조작합니다.
+사람이 걸으면 로봇이 걷고, 상체(팔·허리)와 손 그랩은 사람 동작을 따라갑니다.
 
 ```
-D555 ─► Fast SAM 3D Body ─SMPL (ZMQ :5556, v2)─► SONIC C++ deploy ─DDS rt/lowcmd─► isaac_sonic_bridge.py (headless physics)
-        (fast_sam_3d_body env)                    (GR00T-WholeBodyControl) ◄─rt/lowstate──   │ rt/lowstate + rt/odostate
-                                                                                              ▼
-                                                                         isaac_viewer.py (Isaac Sim window, keys)
+D555 → Fast SAM 3D Body (사람 자세·위치·손) → teleop_planner.py → SONIC (NVIDIA 전신 제어 정책) → Isaac Sim G1
 ```
 
-[SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl) is NVIDIA's learned whole-body controller: its SMPL
-encoder maps the human body model (joint rotations included) to the robot and keeps balance, so elbows, waist and
-legs follow the operator. Hands are not retargeted.
+## 1. 설치
 
-This folder is meant to be cloned **into an Isaac Lab checkout** (tested with Isaac Lab v2.3.2):
+이 저장소는 **Isaac Lab 폴더 바로 안에** clone 합니다 (Isaac Lab v2.3.2 에서 확인).
+
 ```bash
 cd ~/IsaacLab
 git clone https://github.com/JihunHa-sh/2026_10_GIST_AILAB_Challenge.git
 ```
-First-time installation of the external pieces (SONIC, Fast SAM 3D Body, TensorRT, ...): see **[SETUP.md](SETUP.md)**.
 
-## Run (four terminals, in this order)
+결과:
+```
+~/IsaacLab/
+├── isaaclab.sh
+└── 2026_10_GIST_AILAB_Challenge/   ← 이 저장소
+```
 
-| Terminal | Conda env | Role |
+처음 설치하는 PC라면 외부 구성요소(SONIC, Fast SAM 3D Body, TensorRT, DDS 등)를 **[SETUP.md](SETUP.md)** 순서대로
+설치하세요 (`~/third_party` 에 설치됨). 필요한 conda 환경은 두 개입니다.
+- `env_isaaclab` : Isaac Lab 환경 (터미널 1, 2, 3, 5)
+- `fast_sam_3d_body` : 카메라 자세 추정 환경 (터미널 4)
+
+SMPL 모델 파일은 라이선스 문제로 저장소에 없습니다. SETUP.md 6번대로 받아서
+`2026_10_GIST_AILAB_Challenge/assets/smpl/SMPL_NEUTRAL.pkl` 에 두세요.
+
+## 2. 터미널 명령 (5개, 이 순서대로)
+
+모든 터미널에서 먼저 `cd ~/IsaacLab` 하세요.
+
+| 터미널 | conda 환경 | 명령 | 역할 |
+|---|---|---|---|
+| 1 | `env_isaaclab` | `nice -n 10 ./isaaclab.sh -p 2026_10_GIST_AILAB_Challenge/isaac_viewer.py` | Isaac Sim 화면 (창이 뜰 때까지 기다리기) |
+| 2 | `env_isaaclab` | `./isaaclab.sh -p 2026_10_GIST_AILAB_Challenge/isaac_sonic_bridge.py --headless` | 물리 시뮬레이션 |
+| 3 | `env_isaaclab` | `python 2026_10_GIST_AILAB_Challenge/run_sonic.py --input-type zmq_manager --zmq-port 5559` | SONIC 제어기 |
+| 4 | `fast_sam_3d_body` | `python 2026_10_GIST_AILAB_Challenge/run_fastsam_publisher.py` | 카메라 + 자세 추정 |
+| 5 | `env_isaaclab` | `python 2026_10_GIST_AILAB_Challenge/teleop_planner.py` | 원격조작 (키 입력은 여기) |
+
+터미널 4는 시작할 때 카메라 IMU로 중력 방향을 잡으니 **카메라를 움직이지 마세요.**
+
+## 3. 사용법
+
+1. 카메라에서 2~3 m 떨어져 **카메라를 정면으로 보고 차렷 자세**(팔을 쭉 펴서 내림)로 섭니다.
+   화면에 **나 혼자** 머리부터 발까지 보여야 합니다.
+2. **터미널 5에서 `ENTER`** → 로봇 제어 시작 + 팔/방향 보정 (지금 내 차렷 자세 = 로봇 차렷 자세).
+3. **Isaac Sim 창(터미널 1)에서 `9`** → 로봇이 바닥에 내려와 섭니다.
+4. 움직이면 로봇이 따라옵니다.
+   - **걷기**: 앞·뒤·옆으로 걸으면 로봇도 같은 방향으로 걷습니다. 몸을 돌리면 로봇도 돕니다.
+   - **팔·허리**: 양손목 위치/방향과 상체를 따라갑니다.
+   - **손**: 주먹을 쥐면 로봇 손이 꽉 쥐고(그랩), 펴면 완전히 폅니다.
+
+터미널 5 키 (입력 후 `ENTER`):
+
+| 키 | 동작 |
+|---|---|
+| `ENTER` 만 | 다시 보정 (팔이 어긋나 보이면 차렷 자세로 서서 누르기) |
+| `l` | 걷기 끄기/켜기 (끄면 제자리에서 상체만 따라감) |
+| `o` | 로봇 정지 |
+
+Isaac Sim 창 키: `9` 로봇 내리기/다시 잡기, `R` 처음 위치로 리셋, `7`/`8` 매다는 높이 조절.
+
+로그 보는 법:
+- 터미널 5 `[loco]` : `face-to-cam` 이 카메라를 볼 때 0 근처, `cmd` 가 서 있을 때 `IDLE` 이면 정상.
+- 터미널 4 `[hands]` : 손 굽힘 값과 `GRAB`/`open` 상태. `Live: ... publish=50.0Hz` 면 정상 송신 중.
+- 터미널 2 : `rtf=1.00` 이 유지돼야 합니다 (낮아지면 다른 무거운 프로그램을 끄세요).
+
+## 4. 자주 쓰는 옵션
+
+| 대상 | 옵션 | 설명 |
 |---|---|---|
-| 1 | `env_isaaclab` | Isaac Sim viewer |
-| 2 | `env_isaaclab` | physics bridge (headless) |
-| 3 | `env_isaaclab` | SONIC controller (keyboard input goes here) |
-| 4 | `fast_sam_3d_body` | D555 + Fast SAM 3D Body publisher |
+| 터미널 5 | `--walk-start 0.2 --walk-stop 0.1` | 걷기 시작/정지 속도 기준 [m/s] |
+| 터미널 5 | `--speed-gain 1.0 --max-speed 0.6` | 로봇 속도 = 사람 속도 × gain (최대값) |
+| 터미널 5 | `--turn-deadband 10` | 이 각도[deg]보다 작은 몸 회전은 무시 |
+| 터미널 4 | `--grab-close 0.5 --grab-open 0.3` | 손을 쥐는/펴는 기준 (0 = 편 손, 1 = 주먹) |
+| 터미널 4 | `--hand-mode fingers` | 그랩 대신 손가락별로 비례해서 굽힘 |
 
-**1. Viewer** — start first and wait until the window is up (its startup is CPU-heavy and slows the physics).
-```bash
-conda activate env_isaaclab && cd ~/IsaacLab
-nice -n 10 ./isaaclab.sh -p 2026_10_GIST_AILAB_Challenge/isaac_viewer.py
-```
+**전신 따라하기 모드** (걷기 없이 다리까지 사람 자세를 그대로 따라함): 터미널 3을
+`python 2026_10_GIST_AILAB_Challenge/run_sonic.py --input-type zmq` 로 실행하고 터미널 5는 쓰지 않습니다.
+터미널 3에서 `]` → Isaac Sim 창에서 `9` → 차렷 자세로 서서 터미널 3에서 `ENTER`.
 
-**2. Physics bridge**
-```bash
-conda activate env_isaaclab && cd ~/IsaacLab
-./isaaclab.sh -p 2026_10_GIST_AILAB_Challenge/isaac_sonic_bridge.py --headless
-```
-Its log should show `rtf=1.00`. The G1 hangs on a virtual gantry.
+## 5. 파일 구성
 
-**3. SONIC controller**
-```bash
-conda activate env_isaaclab && cd ~/IsaacLab
-python 2026_10_GIST_AILAB_Challenge/run_sonic.py --input-type zmq
-```
-Wait for `Init Done` (~20 s).
-
-**4. Camera publisher**
-```bash
-conda activate fast_sam_3d_body && cd ~/IsaacLab
-python 2026_10_GIST_AILAB_Challenge/run_fastsam_publisher.py
-```
-Keep the camera still for the first second (gravity calibration from the D555 IMU, so camera tilt needs no
-setting). Stand 2-3 m away, whole body in view, nobody else in the picture (it only publishes when exactly one
-person is detected). `Live: ... infer throughput` should read ~22-28 fps.
-
-**Bring-up**
-1. Terminal 3: `]` → policy running (robot still on the gantry).
-2. Viewer window: `9` → the robot is lowered onto its feet and released.
-3. Stand still in a neutral pose, then terminal 3: `ENTER` → streaming on, the robot follows you.
-   `ENTER` again pauses (the robot holds); get close to the robot's pose before resuming.
-4. Terminal 3: `O` = stop. Viewer: `9` catches the robot, `R` resets it onto the gantry, `7`/`8` move the gantry.
-
-## Files
-
-| File | Purpose |
+| 파일 | 내용 |
 |---|---|
-| `isaac_sonic_bridge.py` | Isaac Sim stand-in for the G1 on DDS (replaces SONIC's MuJoCo sim) |
-| `isaac_viewer.py` | Isaac Sim window mirroring the bridge's robot state; forwards keys to the bridge |
-| `run_sonic.py` | Launch SONIC's `g1_deploy_onnx_ref` like `deploy.sh sim`, without `just`/sudo |
-| `run_fastsam_publisher.py` | Fast SAM 3D Body publisher on the D555 (896x504; upstream's 848x480 is not a D555 mode) |
-| `config/obs_config_fastsam.yaml` | SONIC obs config for SMPL streaming (from Fast-SAM docs; the default one errors out) |
-| `assets/smpl/` | put `SMPL_NEUTRAL.pkl` here (licensed, not in the repo) |
-| `tools/run_trial.py` | Unattended trial (bridge + SONIC + SMPL file or live publisher, optional viewer) with a fall verdict |
-| `tools/stream_smpl_file.py` | Stream an SMPL file in Fast SAM's wire format (test without the camera) |
-| `tools/mujoco_reference.py` | Same test against SONIC's official MuJoCo sim |
-| `tools/test_hold_lowcmd.py` | Bridge self-test without SONIC |
+| `isaac_viewer.py` | Isaac Sim 화면 (물리 상태를 받아 그리기만 함, 키 입력 전달) |
+| `isaac_sonic_bridge.py` | Isaac Sim 물리 (SONIC 의 MuJoCo 시뮬 대신, DDS 로 실제 G1 처럼 동작) |
+| `run_sonic.py` | SONIC C++ 제어기 실행 |
+| `run_fastsam_publisher.py` | D555 + Fast SAM 3D Body (자세·골반 위치·손 → ZMQ :5556) |
+| `teleop_planner.py` | 원격조작: 골반 위치 → 걷기 명령, 자세 → 상체 3점(손목·목), 손 그랩 → SONIC (ZMQ :5559) |
+| `vr3pt.py` | SMPL 자세 → SONIC 의 VR 3점 형식 (PICO 원격조작 코드 재사용) |
+| `hand_retarget.py` | 손 키포인트 → 손가락 굽힘 → Dex3 관절값 |
+| `g1_dex3.py` | SONIC 학습용 G1 모델의 Dex3 손가락 관절을 움직이게 설정 |
+| `config/obs_config_fastsam.yaml` | SONIC 관측 설정 |
+| `tools/` | 카메라 없이 하는 시험 (`run_trial.py`, `planner_test.py`, `stream_smpl_file.py` 등) |
 
-External code is looked up under `$THIRD_PARTY` (default `~/third_party`); `tools/run_trial.py` finds Isaac Lab by
-walking up to `isaaclab.sh` (override with `$ISAACLAB_PATH`).
-
-## What had to match SONIC's training setup (A/B against the official MuJoCo sim)
-
-| Setting | Result |
-|---|---|
-| PD in PhysX joint drives (`--pd implicit`), as in SONIC's Isaac Lab training | explicit per-step torque PD oscillated and fell |
-| Contact material friction 1.0/1.0, combine multiply (also sim default) | Isaac's 0.5 default: walking stream fell 2/2; matched: 4/4 walked 2-4.6 m |
-| Soft landing from the gantry | dropping from 0.2 m was hit-or-miss; soft landing stood 4/4 |
-| Physics in a headless process + separate viewer | with rendering in the loop (~7 ms stalls) the walk fell 3/3 |
-| 200 Hz physics (training rate) | keeps real time with the viewer; 500 Hz also works headless |
-
-## Testing without the camera
+카메라 없이 시뮬만 확인:
 ```bash
-cd ~/IsaacLab
-python 2026_10_GIST_AILAB_Challenge/tools/run_trial.py --tag stand --seconds 60
-python 2026_10_GIST_AILAB_Challenge/tools/run_trial.py --tag walk --viewer --stream walk --hold_first 20 --seconds 90
+python 2026_10_GIST_AILAB_Challenge/tools/run_trial.py --tag check --seconds 50                       # 서 있기 → STOOD
+python 2026_10_GIST_AILAB_Challenge/tools/run_trial.py --tag arms --viewer --planner --planner_args "--arms --start-delay 25" --release_after 3 --seconds 85
 ```
+
+## 참고: Isaac Sim 에서 SONIC 을 안정적으로 돌리기 위해 맞춘 것
+
+| 설정 | 이유 |
+|---|---|
+| PD 제어를 PhysX 관절 드라이브에 넣음 (SONIC 학습과 동일) | 매 스텝 토크 계산 방식은 진동하다 넘어짐 |
+| 바닥 마찰 1.0 (학습과 동일) | Isaac 기본값 0.5 에서는 걸을 때 발이 미끄러짐 |
+| 물리는 화면 없는 프로세스, 화면은 별도 뷰어 | 물리 루프 안에서 렌더링하면 제어 타이밍이 흔들려 떨리고 넘어짐 |
+| 200 Hz 물리 (학습과 동일), 매달린 상태에서 천천히 내려놓기 | 실시간 유지, 안정적인 착지 |
+| Dex3 손가락은 같은 손 안끼리 충돌 끔 | 충돌 모양이 겹쳐 엄지가 밀려남 (물체와의 충돌은 유지) |

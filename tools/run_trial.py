@@ -49,6 +49,10 @@ parser.add_argument("--hold_first", type=float, default=60.0,
 parser.add_argument("--gui", action="store_true", help="run the bridge with the Isaac Sim window")
 parser.add_argument("--viewer", action="store_true", help="also run isaac_viewer.py (bridge stays headless)")
 parser.add_argument("--publisher", action="store_true", help="use the live D555 Fast SAM 3D Body publisher as the source")
+parser.add_argument("--planner", action="store_true",
+                    help="source = tools/planner_test.py (SONIC --input-type zmq_manager, locomotion planner)")
+parser.add_argument("--planner_args", default="", help="extra args for planner_test.py")
+parser.add_argument("--stream_args", default="", help="extra args for stream_smpl_file.py, e.g. '--hand-cycle 3'")
 parser.add_argument("--fall_z", type=float, default=0.5)
 parser.add_argument("bridge_args", nargs=argparse.REMAINDER)
 args = parser.parse_args()
@@ -78,7 +82,13 @@ while "motors mapped" not in open(log + "_bridge.log").read():
     time.sleep(1)
 
 keys = "1:]"
-if args.publisher:
+input_type = "zmq"
+if args.planner:
+    keys, input_type = "", "zmq_manager"  # start comes from the 'command' topic
+    procs.append(subprocess.Popen(
+        [sys.executable, os.path.join(SCRIPTS, "tools/planner_test.py")] + args.planner_args.split(),
+        stdout=open(log + "_planner.log", "w"), stderr=subprocess.STDOUT, start_new_session=True))
+elif args.publisher:
     keys += f",{args.enter_after}:ENTER"
     fastsam_py = os.path.join(HOME, "miniconda3/envs/fast_sam_3d_body/bin/python")
     nvj = os.path.join(HOME, "miniconda3/envs/fast_sam_3d_body/lib/python3.11/site-packages/nvidia/nvjitlink/lib")
@@ -89,10 +99,10 @@ elif args.stream:
     keys += f",{args.enter_after}:ENTER"
     procs.append(subprocess.Popen(
         [sys.executable, os.path.join(SCRIPTS, "tools/stream_smpl_file.py"), "--file", STREAMS.get(args.stream, args.stream),
-         "--loop", "--hold-first", str(args.hold_first)], stdout=open(log + "_stream.log", "w"), stderr=subprocess.STDOUT,
+         "--loop", "--hold-first", str(args.hold_first)] + args.stream_args.split(), stdout=open(log + "_stream.log", "w"), stderr=subprocess.STDOUT,
         start_new_session=True))
 deploy = subprocess.Popen(
-    [sys.executable, os.path.join(SCRIPTS, "run_sonic.py"), "--input-type", "zmq", "--keys", keys],
+    [sys.executable, os.path.join(SCRIPTS, "run_sonic.py"), "--input-type", input_type] + (["--keys", keys] if keys else []),
     stdin=subprocess.DEVNULL, stdout=open(log + "_deploy.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
 bridge.wait()
 def kill_group(pgid: int, grace: float = 8.0):

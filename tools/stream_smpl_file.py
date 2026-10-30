@@ -29,6 +29,8 @@ parser.add_argument("--rate", type=float, default=50.0, help="publish rate [Hz] 
 parser.add_argument("--loop", action="store_true")
 parser.add_argument("--start-delay", type=float, default=0.0)
 parser.add_argument("--hold-first", type=float, default=0.0, help="repeat the first frame for N s before playing")
+parser.add_argument("--hand-cycle", type=float, default=0.0,
+                    help="also send Dex3 hand joints, alternating open/closed every N s (0 = no hand fields)")
 args = parser.parse_args()
 
 sys.path.insert(0, GR00T)
@@ -66,12 +68,20 @@ ctx = zmq.Context()
 sock = ctx.socket(zmq.PUB)
 sock.setsockopt(zmq.LINGER, 0)
 sock.bind(args.addr)
-header = json.dumps({"v": 2, "endian": "le", "count": 1, "fields": [
+fields = [
     {"name": "frame_index", "dtype": "i64", "shape": [1]},
     {"name": "body_quat", "dtype": "f64", "shape": [1, 4]},
     {"name": "smpl_joints", "dtype": "f64", "shape": [1, 24, 3]},
     {"name": "smpl_pose", "dtype": "f64", "shape": [1, 21, 3]},
-]}, separators=(",", ":")).encode().ljust(1280, b"\0")
+]
+if args.hand_cycle > 0:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from hand_retarget import DEX3_CLOSED  # noqa: E402
+
+    fields += [{"name": "left_hand_joints", "dtype": "f64", "shape": [1, 7]},
+               {"name": "right_hand_joints", "dtype": "f64", "shape": [1, 7]}]
+header = json.dumps({"v": 2, "endian": "le", "count": 1, "fields": fields},
+                    separators=(",", ":")).encode().ljust(1280, b"\0")
 
 time.sleep(args.start_delay)
 t0, frame_idx, n = time.time(), 0, 0
@@ -85,6 +95,9 @@ while True:
         t0, i = time.time() - args.hold_first, 0
     msg = (b"pose" + header + np.array([frame_idx], np.int64).tobytes() + body_quat[i].tobytes()
            + smpl_joints[i].tobytes() + smpl_pose[i].tobytes())
+    if args.hand_cycle > 0:
+        closed = int(el / args.hand_cycle) % 2 == 1
+        msg += b"".join((DEX3_CLOSED[s] * closed).astype(np.float64).tobytes() for s in ("left", "right"))
     sock.send(msg)
     frame_idx += 1
     if frame_idx % int(args.rate * 2) == 0:

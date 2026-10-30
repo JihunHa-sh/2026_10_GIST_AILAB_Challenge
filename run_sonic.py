@@ -35,6 +35,8 @@ parser.add_argument("--motion-data", default="reference/example/")
 parser.add_argument("--input-type", default="zmq", help="keyboard | zmq | manager | zmq_manager | ...")
 parser.add_argument("--output-type", default="all")
 parser.add_argument("--zmq-host", default="localhost")
+parser.add_argument("--zmq-port", type=int, default=5556,
+                    help="5556 = Fast SAM publisher (streamed SMPL); 5559 = teleop_planner.py (zmq_manager)")
 parser.add_argument("--keys", default="",
                     help='scripted keys "t1:k1,t2:k2", seconds after the binary prints "Init Done"; k may be ENTER')
 parser.add_argument("--duration", type=float, default=0.0, help="kill after N s (0 = until it exits)")
@@ -60,6 +62,7 @@ cmd = [
     "--input-type", args.input_type,
     "--output-type", args.output_type,
     "--zmq-host", args.zmq_host,
+    "--zmq-port", str(args.zmq_port),
     "--disable-crc-check",
 ] + [a for a in args.extra if a != "--"]
 
