@@ -9,27 +9,75 @@ D555 → Fast SAM 3D Body (사람 자세·위치·손) → teleop_planner.py →
 
 ## 1. 설치
 
-이 저장소는 **Isaac Lab 폴더 바로 안에** clone 합니다 (Isaac Lab v2.3.2 에서 확인).
+### 1-1. 이 저장소 받기
+
+이 저장소는 **Isaac Lab 폴더 바로 안에** clone 합니다 (Isaac Lab v2.3.2, conda 환경 `env_isaaclab` 에서 확인).
 
 ```bash
 cd ~/IsaacLab
 git clone https://github.com/JihunHa-sh/2026_10_GIST_AILAB_Challenge.git
 ```
-
-결과:
 ```
 ~/IsaacLab/
 ├── isaaclab.sh
-└── 2026_10_GIST_AILAB_Challenge/   ← 이 저장소
+└── 2026_10_GIST_AILAB_Challenge/   ← 이 저장소 (연결 코드만 들어 있음)
 ```
 
-처음 설치하는 PC라면 외부 구성요소(SONIC, Fast SAM 3D Body, TensorRT, DDS 등)를 **[SETUP.md](SETUP.md)** 순서대로
-설치하세요 (`~/third_party` 에 설치됨). 필요한 conda 환경은 두 개입니다.
-- `env_isaaclab` : Isaac Lab 환경 (터미널 1, 2, 3, 5)
-- `fast_sam_3d_body` : 카메라 자세 추정 환경 (터미널 4)
+### 1-2. 외부 구성요소 설치 (새 PC 에서 한 번)
 
-SMPL 모델 파일은 라이선스 문제로 저장소에 없습니다. SETUP.md 6번대로 받아서
-`2026_10_GIST_AILAB_Challenge/assets/smpl/SMPL_NEUTRAL.pkl` 에 두세요.
+이 저장소만으로는 동작하지 않습니다. 아래 구성요소가 `~/third_party` 에 있어야 합니다.
+필요 조건: Ubuntu, NVIDIA GPU + CUDA 12.x 툴킷, RealSense D555, Isaac Lab(`env_isaaclab`), conda.
+명령은 요약이며, 막히면 **[SETUP.md](SETUP.md)** 의 같은 번호를 보세요 (빌드 옵션·오류 해결 포함).
+
+| # | 무엇 | 왜 필요한가 |
+|---|---|---|
+| ① | SONIC (GR00T-WholeBodyControl) + 모델 | 로봇 전신 제어 정책 |
+| ② | SONIC C++ 제어기 빌드 (zmq 등 라이브러리, TensorRT 10.13, onnxruntime 1.16.3) | 정책 실행 프로그램 (`run_sonic.py` 가 실행) |
+| ③ | `env_isaaclab` 에 DDS 패키지 (cyclonedds 0.10.2, unitree_sdk2py) + `joblib pyzmq msgpack` | Isaac Sim ↔ SONIC 통신 |
+| ④ | Fast SAM 3D Body + conda 환경 `fast_sam_3d_body` + 가중치 | 카메라 영상 → 사람 자세 |
+| ⑤ | MHR → SMPL 변환 파일 | 자세 형식 변환 |
+| ⑥ | SMPL 모델 `SMPL_NEUTRAL.pkl` (라이선스, 직접 받기) | 자세 형식 변환 |
+
+```bash
+export THIRD_PARTY=~/third_party && mkdir -p $THIRD_PARTY
+
+# ① SONIC + 모델
+cd $THIRD_PARTY && git clone https://github.com/NVlabs/GR00T-WholeBodyControl.git && cd GR00T-WholeBodyControl
+git lfs pull && conda activate env_isaaclab
+python download_from_hf.py --output-dir $PWD/gear_sonic_deploy && python download_from_hf.py --sample
+
+# ② SONIC C++ 빌드: SETUP.md 2번 (sudo 없이 라이브러리 빌드 → TensorRT/onnxruntime 다운로드 → cmake)
+#    결과물: $THIRD_PARTY/GR00T-WholeBodyControl/gear_sonic_deploy/target/release/g1_deploy_onnx_ref
+
+# ③ DDS (unitree_sdk2 에 들어있는 ddsc 로 cyclonedds 빌드)
+T=$THIRD_PARTY/GR00T-WholeBodyControl/gear_sonic_deploy/thirdparty/unitree_sdk2/thirdparty
+H=$THIRD_PARTY/cyclonedds_home && mkdir -p $H/bin && ln -sfn $T/include $H/include && ln -sfn $T/lib/x86_64 $H/lib
+CYCLONEDDS_HOME=$H pip install "cyclonedds==0.10.2"
+pip install --no-deps -e $THIRD_PARTY/GR00T-WholeBodyControl/external_dependencies/unitree_sdk2_python
+pip install joblib pyzmq msgpack
+
+# ④ Fast SAM 3D Body (환경 생성 후 SETUP.md 4번의 수정사항 적용)
+cd $THIRD_PARTY && git clone https://github.com/yangtiming/Fast-SAM-3D-Body.git && cd Fast-SAM-3D-Body
+bash setup_env.sh
+#    가중치: https://huggingface.co/facebook/sam-3d-body-dinov3 접근 승인(수동, 시간 걸림) → `hf auth login` (Read 토큰)
+#            → SETUP.md 4번의 다운로드 명령 (SAM 3D Body + YOLO11m-pose)
+
+# ⑤ MHR → SMPL 변환 파일
+cd $THIRD_PARTY && git clone --depth 1 --filter=blob:none --sparse https://github.com/facebookresearch/MHR.git mhr
+cd mhr && git sparse-checkout set tools/mhr_smpl_conversion/assets && git lfs pull --include "tools/mhr_smpl_conversion/assets/*"
+
+# ⑥ SMPL: https://smplify.is.tue.mpg.de/ 가입 → mpips_smplify_public_v2.zip 다운로드 후
+unzip -p mpips_smplify_public_v2.zip smplify_public/code/models/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl \
+  > ~/IsaacLab/2026_10_GIST_AILAB_Challenge/assets/smpl/SMPL_NEUTRAL.pkl
+```
+
+설치 확인 (카메라 없이 시뮬만, 약 1분):
+```bash
+cd ~/IsaacLab && conda activate env_isaaclab
+python 2026_10_GIST_AILAB_Challenge/tools/run_trial.py --tag check --seconds 50     # 마지막 줄에 STOOD 가 나오면 성공
+```
+
+외부 구성요소를 `~/third_party` 가 아닌 곳에 설치했다면 모든 터미널에서 `export THIRD_PARTY=<경로>` 를 먼저 하세요.
 
 ## 2. 터미널 명령 (5개, 이 순서대로)
 
