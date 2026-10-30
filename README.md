@@ -172,6 +172,7 @@ python 2026_10_GIST_AILAB_Challenge/tools/run_trial.py --tag check --seconds 50
 conda activate fast_sam_3d_body
 python 2026_10_GIST_AILAB_Challenge/run_fastsam_publisher.py
 ```
+터미널 4의 첫 실행은 HuggingFace 에서 공개 모델(MoGe)을 자동으로 받으므로 인터넷이 필요합니다 (이후엔 캐시 사용).
 카메라를 못 찾는다는 오류가 나면 RealSense 가 USB 3 포트에 꽂혔는지 확인하고, 그래도 안 되면 librealsense 의
 udev 규칙을 설치하세요 (관리자 권한 필요).
 외부 구성요소를 `~/third_party` 가 아닌 곳에 설치했다면 모든 터미널에서 `export THIRD_PARTY=<경로>` 를 먼저 하세요.
